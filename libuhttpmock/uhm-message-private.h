@@ -1,7 +1,7 @@
 /* -*- Mode: C; indent-tabs-mode: t; c-basic-offset: 8; tab-width: 8 -*- */
 /*
  * uhttpmock
- * Copyright (C) Philip Withnall 2013 <philip@tecnocode.co.uk>
+ * Copyright (C) Igalia S.L. 2021 <dkolesa@igalia.com>
  *
  * uhttpmock is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -17,13 +17,9 @@
  * License along with uhttpmock.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#ifndef UHM_H
-#define UHM_H
+#pragma once
 
-/* Core files */
-#include <uhttpmock/uhm-message.h>
-#include <uhttpmock/uhm-server.h>
-#include <uhttpmock/uhm-resolver.h>
-#include <uhttpmock/uhm-version.h>
+#include "uhm-message.h"
 
-#endif /* !UHM_H */
+UhmMessage *uhm_message_new_from_uri (const gchar *method, GUri *uri);
+UhmMessage *uhm_message_new_from_server_message (SoupServerMessage *smsg);

@@ -1,0 +1,46 @@
+image: debian:unstable
+
+before_script:
+  - apt update -qq
+  - apt install -y -qq
+      build-essential
+      ca-certificates
+      gobject-introspection
+      git
+      gtk-doc-tools
+      libgirepository1.0-dev
+      libglib2.0-dev
+      libsoup-3.0-dev
+      libxml2-utils
+      meson
+      pkg-config
+      valac
+
+stages:
+  - build
+
+build-check:
+  stage: build
+  script:
+    - unset CI_JOB_JWT
+    - meson
+        -Dgtk_doc=true
+        -Dintrospection=true
+        -Dvapi=enabled
+        --buildtype debug
+        --wrap-mode=nodownload
+        --fatal-meson-warnings
+        --werror
+        _build
+    - ninja -C _build
+    - meson test -C _build
+    - meson dist -C _build
+
+  # The files which are to be made available in GitLab
+  artifacts:
+    when: always
+    expire_in: 1 week
+    paths:
+      - _build/meson-logs/
+      - _build/meson-dist/
+      - _build/docs/reference/

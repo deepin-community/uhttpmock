@@ -54,7 +54,9 @@
 
 static void uhm_resolver_finalize (GObject *object);
 
+static GList *uhm_resolver_lookup_by_name_with_flags (GResolver *resolver, const gchar *hostname, GResolverNameLookupFlags flags, GCancellable *cancellable, GError **error);
 static GList *uhm_resolver_lookup_by_name (GResolver *resolver, const gchar *hostname, GCancellable *cancellable, GError **error);
+static void uhm_resolver_lookup_by_name_with_flags_async (GResolver *resolver, const gchar *hostname, GResolverNameLookupFlags flags, GCancellable *cancellable, GAsyncReadyCallback callback, gpointer user_data);
 static void uhm_resolver_lookup_by_name_async (GResolver *resolver, const gchar *hostname, GCancellable *cancellable, GAsyncReadyCallback callback, gpointer user_data);
 static GList *uhm_resolver_lookup_by_name_finish (GResolver *resolver, GAsyncResult *result, GError **error);
 static GList *uhm_resolver_lookup_service (GResolver *resolver, const gchar *rrname, GCancellable *cancellable, GError **error);
@@ -89,6 +91,9 @@ uhm_resolver_class_init (UhmResolverClass *klass)
 	resolver_class->lookup_by_name = uhm_resolver_lookup_by_name;
 	resolver_class->lookup_by_name_async = uhm_resolver_lookup_by_name_async;
 	resolver_class->lookup_by_name_finish = uhm_resolver_lookup_by_name_finish;
+	resolver_class->lookup_by_name_with_flags = uhm_resolver_lookup_by_name_with_flags;
+	resolver_class->lookup_by_name_with_flags_async = uhm_resolver_lookup_by_name_with_flags_async;
+	resolver_class->lookup_by_name_with_flags_finish = uhm_resolver_lookup_by_name_finish;
 	resolver_class->lookup_service = uhm_resolver_lookup_service;
 	resolver_class->lookup_service_async = uhm_resolver_lookup_service_async;
 	resolver_class->lookup_service_finish = uhm_resolver_lookup_service_finish;
@@ -144,7 +149,7 @@ fake_services_free (GList/*<owned GSrvTarget>*/ *services)
 }
 
 static GList *
-find_fake_hosts (UhmResolver *self, const char *name)
+find_fake_hosts (UhmResolver *self, const char *name, GResolverNameLookupFlags flags)
 {
 	GList *fake = NULL;
 	GList *rval = NULL;
@@ -152,7 +157,24 @@ find_fake_hosts (UhmResolver *self, const char *name)
 	for (fake = self->priv->fake_A; fake != NULL; fake = g_list_next (fake)) {
 		FakeHost *entry = fake->data;
 		if (entry != NULL && !g_strcmp0 (entry->key, name)) {
-			rval = g_list_append (rval, g_inet_address_new_from_string (entry->addr));
+			g_autoptr (GInetAddress) addr;
+			GSocketFamily fam;
+			addr = g_inet_address_new_from_string (entry->addr);
+			fam = g_inet_address_get_family (addr);
+			switch (flags) {
+				case G_RESOLVER_NAME_LOOKUP_FLAGS_IPV4_ONLY:
+					if (fam == G_SOCKET_FAMILY_IPV6)
+						continue;
+					break;
+				case G_RESOLVER_NAME_LOOKUP_FLAGS_IPV6_ONLY:
+					if (fam == G_SOCKET_FAMILY_IPV4)
+						continue;
+					break;
+				case G_RESOLVER_NAME_LOOKUP_FLAGS_DEFAULT:
+				default:
+					break;
+			}
+			rval = g_list_append (rval, g_steal_pointer (&addr));
 		}
 	}
 
@@ -166,11 +188,11 @@ fake_hosts_free (GList/*<owned GInetAddress>*/ *addrs)
 }
 
 static GList *
-uhm_resolver_lookup_by_name (GResolver *resolver, const gchar *hostname, GCancellable *cancellable, GError **error)
+uhm_resolver_lookup_by_name_with_flags (GResolver *resolver, const gchar *hostname, GResolverNameLookupFlags flags, GCancellable *cancellable, GError **error)
 {
 	GList *result;
 
-	result = find_fake_hosts (UHM_RESOLVER (resolver), hostname);
+	result = find_fake_hosts (UHM_RESOLVER (resolver), hostname, flags);
 
 	if (result == NULL) {
 		g_set_error (error, G_RESOLVER_ERROR, G_RESOLVER_ERROR_NOT_FOUND, "No fake hostname record registered for ‘%s’.", hostname);
@@ -179,8 +201,14 @@ uhm_resolver_lookup_by_name (GResolver *resolver, const gchar *hostname, GCancel
 	return result;
 }
 
+static GList *
+uhm_resolver_lookup_by_name (GResolver *resolver, const gchar *hostname, GCancellable *cancellable, GError **error)
+{
+	return uhm_resolver_lookup_by_name_with_flags (resolver, hostname, G_RESOLVER_NAME_LOOKUP_FLAGS_DEFAULT, cancellable, error);
+}
+
 static void
-uhm_resolver_lookup_by_name_async (GResolver *resolver, const gchar *hostname, GCancellable *cancellable, GAsyncReadyCallback callback, gpointer user_data)
+uhm_resolver_lookup_by_name_with_flags_async (GResolver *resolver, const gchar *hostname, GResolverNameLookupFlags flags, GCancellable *cancellable, GAsyncReadyCallback callback, gpointer user_data)
 {
 	GTask *task = NULL;  /* owned */
 	GList/*<owned GInetAddress>*/ *addr = NULL;  /* owned */
@@ -189,7 +217,7 @@ uhm_resolver_lookup_by_name_async (GResolver *resolver, const gchar *hostname, G
 	task = g_task_new (resolver, cancellable, callback, user_data);
 	g_task_set_source_tag (task, uhm_resolver_lookup_by_name_async);
 
-	addr = uhm_resolver_lookup_by_name (resolver, hostname, NULL, &error);
+	addr = uhm_resolver_lookup_by_name_with_flags (resolver, hostname, flags, NULL, &error);
 
 	if (addr != NULL) {
 		g_task_return_pointer (task, addr,
@@ -199,6 +227,12 @@ uhm_resolver_lookup_by_name_async (GResolver *resolver, const gchar *hostname, G
 	}
 
 	g_object_unref (task);
+}
+
+static void
+uhm_resolver_lookup_by_name_async (GResolver *resolver, const gchar *hostname, GCancellable *cancellable, GAsyncReadyCallback callback, gpointer user_data)
+{
+	uhm_resolver_lookup_by_name_with_flags_async (resolver, hostname, G_RESOLVER_NAME_LOOKUP_FLAGS_DEFAULT, cancellable, callback, user_data);
 }
 
 static GList *

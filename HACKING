@@ -95,7 +95,7 @@ Adding public API
  - All public API must have a gtk-doc comment, and be added to the docs/libuhttpmock-sections.txt file, to include it in the documentation.
    The documentation comment must have a "Since" clause (see "Documentation comments" section).
 
- - All public API must be listed in libuhttpmock/libuhttpmock.symbols.
+ - All public functions must start with `uhm_`; all functions with that prefix are exposed as public API from `libuhttpmock.map`.
 
  - Non-trivial API should have a test case added in the relevant test suite file in libuhttpmock/tests.
 

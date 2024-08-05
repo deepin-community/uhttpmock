@@ -1,0 +1,15 @@
+option('introspection',
+  type: 'boolean',
+  value: true,
+  description: 'Whether to build GObject Introspection (GIR) files',
+)
+option('vapi',
+  type: 'feature',
+  value: 'auto',
+  description: 'Whether to build Vala bindings (requires introspection)',
+)
+option('gtk_doc',
+  type: 'boolean',
+  value: true,
+  description: 'Whether to render the reference documentation (requires gtk-doc)',
+)

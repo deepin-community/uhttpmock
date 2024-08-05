@@ -1,2 +1,4 @@
 version=4
-https://tecnocode.co.uk/downloads/uhttpmock/uhttpmock-(.*)\.tar\.xz
+opts="searchmode=plain" \
+https://gitlab.freedesktop.org/pwithnall/@PACKAGE@/tags?sort=updated_desc \
+ -/archive/[\d.]+/@PACKAGE@@ANY_VERSION@@ARCHIVE_EXT@

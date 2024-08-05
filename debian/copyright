@@ -1,9 +1,11 @@
-Format: http://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: uhttpmock
-Source: http://tecnocode.co.uk/downloads/uhttpmock/
+Source: https://gitlab.freedesktop.org/pwithnall/uhttpmock
 
 Files: *
-Copyright: 2013 Philip Withnall <philip@tecnocode.co.uk>
+Copyright: 2021 Igalia S.L.
+           2020 Rasmus Thomsen
+           2013, 2015 Philip Withnall <philip@tecnocode.co.uk>
            2011 Holger Berndt <hb@gnome.org>
            2009 Collabora Ltd.
 License: LGPL-2.1+

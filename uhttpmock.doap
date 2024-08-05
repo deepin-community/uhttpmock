@@ -2,7 +2,7 @@
 	<name xml:lang="en">uhttpmock</name>
 	<shortdesc xml:lang="en">uhttpmock is a project for mocking web service APIs which use HTTP or HTTPS</shortdesc>
 	<description xml:lang="en">uhttpmock is a project for mocking web service APIs which use HTTP or HTTPS. It provides a library, libuhttpmock, which implements recording and playback of HTTP request–response traces.</description>
-	<homepage rdf:resource="https://gitlab.com/groups/uhttpmock"/>
+	<homepage rdf:resource="https://gitlab.freedesktop.org/pwithnall/uhttpmock"/>
 	<license rdf:resource="http://usefulinc.com/doap/licenses/lgpl"/>
 	<download-page rdf:resource="http://tecnocode.co.uk/downloads/uhttpmock/"/>
 	<maintainer>
@@ -10,6 +10,13 @@
 			<foaf:name>Philip Withnall</foaf:name>
 			<foaf:mbox rdf:resource="mailto:philip@tecnocode.co.uk"/>
 			<gnome:userid>pwithnall</gnome:userid>
+		</foaf:Person>
+	</maintainer>
+	<maintainer>
+		<foaf:Person>
+			<foaf:name>Jan-Michael Brummer</foaf:name>
+			<foaf:mbox rdf:resource="mailto:jan-michael.brummer1@volkswagen.de"/>
+			<gnome:userid>jbrummer</gnome:userid>
 		</foaf:Person>
 	</maintainer>
 </Project>

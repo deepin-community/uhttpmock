@@ -27,7 +27,7 @@ Dependencies
 
  • glib-2.0 ≥ 2.38.0
  • gio-2.0 ≥ 2.36.0
- • libsoup-2.4 ≥ 2.37.91
+ • libsoup-3.0 ≥ 3.0.1
 
 Deprecation guards
 ==================
@@ -44,11 +44,11 @@ Bugs
 ====
 
 Bug reports and merge requests should be submitted on GitLab:
- • https://gitlab.com/uhttpmock/uhttpmock/issues/new
- • https://gitlab.com/uhttpmock/uhttpmock/merge_requests/new
+ • https://gitlab.freedesktop.org/pwithnall/uhttpmock/issues/new
+ • https://gitlab.freedesktop.org/pwithnall/uhttpmock/merge_requests/new
 
 Contact
 =======
 
 Philip Withnall <philip@tecnocode.co.uk>
-https://gitlab.com/groups/uhttpmock
+https://gitlab.freedesktop.org/pwithnall/uhttpmock

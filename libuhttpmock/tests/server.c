@@ -21,6 +21,7 @@
 #include <locale.h>
 #include <string.h>
 #include <libsoup/soup.h>
+#include <locale.h>
 
 #include "uhm-server.h"
 
@@ -376,7 +377,13 @@ set_up_logging (LoggingData *data, gconstpointer user_data)
 	resolver = uhm_server_get_resolver (data->server);
 	uhm_resolver_add_A (resolver, "example.com", uhm_server_get_address (data->server));
 
-	data->session = soup_session_new_with_options (SOUP_SESSION_SSL_STRICT, FALSE, NULL);
+	data->session = soup_session_new ();
+}
+
+static gboolean
+accept_cert (SoupMessage *msg, GTlsCertificate *certificate, GTlsCertificateFlags errors, gpointer user_data)
+{
+	return TRUE;
 }
 
 static void
@@ -390,28 +397,51 @@ tear_down_logging (LoggingData *data, gconstpointer user_data)
 }
 
 static gboolean
-server_logging_no_trace_success_handle_message_cb (UhmServer *server, SoupMessage *message, SoupClientContext *client)
+server_logging_no_trace_success_handle_message_cb (UhmServer *server, UhmMessage *message)
 {
-	soup_message_set_status (message, SOUP_STATUS_OK);
-	soup_message_body_append (message->response_body, SOUP_MEMORY_STATIC, "This is a success response.", strlen ("This is a success response."));
-	soup_message_body_complete (message->response_body);
+	uhm_message_set_status (message, SOUP_STATUS_OK, "OK");
+	soup_message_body_append (uhm_message_get_response_body (message), SOUP_MEMORY_STATIC, "This is a success response.", strlen ("This is a success response."));
+	soup_message_body_complete (uhm_message_get_response_body (message));
 
 	return TRUE;
+}
+
+static SoupStatus
+send_message (SoupSession *session, SoupMessage *msg, GBytes **response)
+{
+	g_autoptr(GInputStream) stream;
+
+	stream = soup_session_send (session, msg, NULL, NULL);
+
+	if (!stream) {
+		*response = NULL;
+		return SOUP_STATUS_NONE;
+	}
+
+	if (response) {
+		/* possible FIXME: do not read fixed size? just tests though */
+		*response = g_input_stream_read_bytes (stream, 4096, NULL, NULL);
+
+		if (!*response)
+			return SOUP_STATUS_NONE;
+	}
+
+	return soup_message_get_status (msg);
 }
 
 static gboolean
 server_logging_no_trace_success_cb (LoggingData *data)
 {
 	SoupMessage *message;
-	SoupURI *uri;
+	g_autoptr(GUri) uri = NULL;
 
 	/* Dummy unit test code. */
-	uri = soup_uri_new ("https://example.com/test-file");
-	soup_uri_set_port (uri, uhm_server_get_port (data->server));
+	uri = g_uri_build (SOUP_HTTP_URI_FLAGS, "https", NULL, "example.com", uhm_server_get_port (data->server), "/test-file", NULL, NULL);
 	message = soup_message_new_from_uri (SOUP_METHOD_GET, uri);
-	soup_uri_free (uri);
 
-	g_assert_cmpuint (soup_session_send_message (data->session, message), ==, SOUP_STATUS_OK);
+	g_signal_connect (message, "accept-certificate", G_CALLBACK (accept_cert), NULL);
+
+	g_assert_cmpuint (send_message (data->session, message, NULL), ==, SOUP_STATUS_OK);
 
 	g_object_unref (message);
 
@@ -429,11 +459,11 @@ test_server_logging_no_trace_success (LoggingData *data, gconstpointer user_data
 }
 
 static gboolean
-server_logging_no_trace_failure_handle_message_cb (UhmServer *server, SoupMessage *message, SoupClientContext *client)
+server_logging_no_trace_failure_handle_message_cb (UhmServer *server, UhmMessage *message)
 {
-	soup_message_set_status (message, SOUP_STATUS_PRECONDITION_FAILED);
-	soup_message_body_append (message->response_body, SOUP_MEMORY_STATIC, "This is a failure response.", strlen ("This is a failure response."));
-	soup_message_body_complete (message->response_body);
+	uhm_message_set_status (message, SOUP_STATUS_PRECONDITION_FAILED, "Precondition Failed");
+	soup_message_body_append (uhm_message_get_response_body (message), SOUP_MEMORY_STATIC, "This is a failure response.", strlen ("This is a failure response."));
+	soup_message_body_complete (uhm_message_get_response_body (message));
 
 	return TRUE;
 }
@@ -442,15 +472,15 @@ static gboolean
 server_logging_no_trace_failure_cb (LoggingData *data)
 {
 	SoupMessage *message;
-	SoupURI *uri;
+	g_autoptr(GUri) uri = NULL;
 
 	/* Dummy unit test code. */
-	uri = soup_uri_new ("https://example.com/test-file");
-	soup_uri_set_port (uri, uhm_server_get_port (data->server));
+	uri = g_uri_build (SOUP_HTTP_URI_FLAGS, "https", NULL, "example.com", uhm_server_get_port (data->server), "/test-file", NULL, NULL);
 	message = soup_message_new_from_uri (SOUP_METHOD_GET, uri);
-	soup_uri_free (uri);
 
-	g_assert_cmpuint (soup_session_send_message (data->session, message), ==, SOUP_STATUS_PRECONDITION_FAILED);
+	g_signal_connect (message, "accept-certificate", G_CALLBACK (accept_cert), NULL);
+
+	g_assert_cmpuint (send_message (data->session, message, NULL), ==, SOUP_STATUS_PRECONDITION_FAILED);
 
 	g_object_unref (message);
 
@@ -471,18 +501,18 @@ static gboolean
 server_logging_trace_success_normal_cb (LoggingData *data)
 {
 	SoupMessage *message;
-	SoupURI *uri;
+	g_autoptr(GUri) uri = NULL;
 
 	/* Load the trace. */
 	assert_server_load_trace (data->server, "server_logging_trace_success_normal");
 
 	/* Dummy unit test code. */
-	uri = soup_uri_new ("https://example.com/test-file");
-	soup_uri_set_port (uri, uhm_server_get_port (data->server));
+	uri = g_uri_build (SOUP_HTTP_URI_FLAGS, "https", NULL, "example.com", uhm_server_get_port (data->server), "/test-file", NULL, NULL);
 	message = soup_message_new_from_uri (SOUP_METHOD_GET, uri);
-	soup_uri_free (uri);
 
-	g_assert_cmpuint (soup_session_send_message (data->session, message), ==, SOUP_STATUS_NOT_FOUND);
+	g_signal_connect (message, "accept-certificate", G_CALLBACK (accept_cert), NULL);
+
+	g_assert_cmpuint (send_message (data->session, message, NULL), ==, SOUP_STATUS_NOT_FOUND);
 
 	g_object_unref (message);
 
@@ -502,8 +532,6 @@ test_server_logging_trace_success_normal (LoggingData *data, gconstpointer user_
 static gboolean
 server_logging_trace_success_multiple_messages_cb (LoggingData *data)
 {
-	SoupMessage *message;
-	SoupURI *uri;
 	guint i;
 	SoupStatus expected_status_codes[] = {
 		SOUP_STATUS_OK,
@@ -516,18 +544,17 @@ server_logging_trace_success_multiple_messages_cb (LoggingData *data)
 
 	/* Dummy unit test code. Send three messages. */
 	for (i = 0; i < G_N_ELEMENTS (expected_status_codes); i++) {
-		gchar *uri_string;
+		g_autoptr(GUri) uri = NULL;
+		g_autofree char *uri_path = NULL;
+		g_autoptr(SoupMessage) message = NULL;
 
-		uri_string = g_strdup_printf ("https://example.com/test-file%u", i);
-		uri = soup_uri_new (uri_string);
-		soup_uri_set_port (uri, uhm_server_get_port (data->server));
-		g_free (uri_string);
+
+		uri_path = g_strdup_printf ("/test-file%u", i);
+		uri = g_uri_build (SOUP_HTTP_URI_FLAGS, "https", NULL, "example.com", uhm_server_get_port (data->server), uri_path, NULL, NULL);
 
 		message = soup_message_new_from_uri (SOUP_METHOD_GET, uri);
-		g_assert_cmpuint (soup_session_send_message (data->session, message), ==, expected_status_codes[i]);
-
-		soup_uri_free (uri);
-		g_object_unref (message);
+		g_signal_connect (message, "accept-certificate", G_CALLBACK (accept_cert), NULL);
+		g_assert_cmpuint (send_message (data->session, message, NULL), ==, expected_status_codes[i]);
 	}
 
 	g_main_loop_quit (data->main_loop);
@@ -546,28 +573,27 @@ test_server_logging_trace_success_multiple_messages (LoggingData *data, gconstpo
 static gboolean
 server_logging_trace_failure_method_cb (LoggingData *data)
 {
-	SoupMessage *message;
-	SoupURI *uri;
+	g_autoptr(SoupMessage) message = NULL;
+	g_autoptr(GUri) uri = NULL;
+	g_autoptr(GBytes) body = NULL;
 
 	/* Load the trace. */
 	assert_server_load_trace (data->server, "server_logging_trace_failure_method");
 
 	/* Dummy unit test code. */
-	uri = soup_uri_new ("https://example.com/test-file");
-	soup_uri_set_port (uri, uhm_server_get_port (data->server));
+	uri = g_uri_build (SOUP_HTTP_URI_FLAGS, "https", NULL, "example.com", uhm_server_get_port (data->server), "/test-file", NULL, NULL);
 	message = soup_message_new_from_uri (SOUP_METHOD_PUT, uri); /* Note: we use PUT here, which doesn’t match the trace */
-	soup_uri_free (uri);
 
-	g_assert_cmpuint (soup_session_send_message (data->session, message), ==, SOUP_STATUS_BAD_REQUEST);
-	g_assert_cmpstr (message->response_body->data, !=, "The document was not found. Ha.");
-	g_assert_cmpstr (message->response_body->data, ==, "Expected GET URI ‘/test-file’, but got PUT ‘/test-file’.");
-	if (strstr (soup_message_headers_get_one (message->response_headers, "X-Mock-Trace-File"), "server_logging_trace_failure_method") == NULL) {
+	g_signal_connect (message, "accept-certificate", G_CALLBACK (accept_cert), NULL);
+
+	g_assert_cmpuint (send_message (data->session, message, &body), ==, SOUP_STATUS_BAD_REQUEST);
+	g_assert_cmpstr (g_bytes_get_data (body, NULL), !=, "The document was not found. Ha.");
+	g_assert_cmpstr (g_bytes_get_data (body, NULL), ==, "Expected GET URI ‘/test-file’, but got PUT ‘/test-file’.");
+	if (strstr (soup_message_headers_get_one (soup_message_get_response_headers (message), "X-Mock-Trace-File"), "server_logging_trace_failure_method") == NULL) {
 		/* Report the error. */
-		g_assert_cmpstr (soup_message_headers_get_one (message->response_headers, "X-Mock-Trace-File"), ==, "server_logging_trace_failure_method");
+		g_assert_cmpstr (soup_message_headers_get_one (soup_message_get_response_headers (message), "X-Mock-Trace-File"), ==, "server_logging_trace_failure_method");
 	}
-	g_assert_cmpstr (soup_message_headers_get_one (message->response_headers, "X-Mock-Trace-File-Offset"), ==, "1");
-
-	g_object_unref (message);
+	g_assert_cmpstr (soup_message_headers_get_one (soup_message_get_response_headers (message), "X-Mock-Trace-File-Offset"), ==, "1");
 
 	g_main_loop_quit (data->main_loop);
 
@@ -585,28 +611,27 @@ test_server_logging_trace_failure_method (LoggingData *data, gconstpointer user_
 static gboolean
 server_logging_trace_failure_uri_cb (LoggingData *data)
 {
-	SoupMessage *message;
-	SoupURI *uri;
+	g_autoptr(SoupMessage) message = NULL;
+	g_autoptr(GUri) uri = NULL;
+	g_autoptr(GBytes) body = NULL;
 
 	/* Load the trace. */
 	assert_server_load_trace (data->server, "server_logging_trace_failure_uri");
 
 	/* Dummy unit test code. */
-	uri = soup_uri_new ("https://example.com/test-file-wrong-uri"); /* Note: wrong URI */
-	soup_uri_set_port (uri, uhm_server_get_port (data->server));
+	uri = g_uri_build (SOUP_HTTP_URI_FLAGS, "https", NULL, "example.com", uhm_server_get_port (data->server), "/test-file-wrong-uri", NULL, NULL); /* Note: wrong URI */
 	message = soup_message_new_from_uri (SOUP_METHOD_GET, uri);
-	soup_uri_free (uri);
 
-	g_assert_cmpuint (soup_session_send_message (data->session, message), ==, SOUP_STATUS_BAD_REQUEST);
-	g_assert_cmpstr (message->response_body->data, !=, "The document was not found. Ha.");
-	g_assert_cmpstr (message->response_body->data, ==, "Expected GET URI ‘/test-file’, but got GET ‘/test-file-wrong-uri’.");
-	if (strstr (soup_message_headers_get_one (message->response_headers, "X-Mock-Trace-File"), "server_logging_trace_failure_uri") == NULL) {
+	g_signal_connect (message, "accept-certificate", G_CALLBACK (accept_cert), NULL);
+
+	g_assert_cmpuint (send_message (data->session, message, &body), ==, SOUP_STATUS_BAD_REQUEST);
+	g_assert_cmpstr (g_bytes_get_data (body, NULL), !=, "The document was not found. Ha.");
+	g_assert_cmpstr (g_bytes_get_data (body, NULL), ==, "Expected GET URI ‘/test-file’, but got GET ‘/test-file-wrong-uri’.");
+	if (strstr (soup_message_headers_get_one (soup_message_get_response_headers (message), "X-Mock-Trace-File"), "server_logging_trace_failure_uri") == NULL) {
 		/* Report the error. */
-		g_assert_cmpstr (soup_message_headers_get_one (message->response_headers, "X-Mock-Trace-File"), ==, "server_logging_trace_failure_uri");
+		g_assert_cmpstr (soup_message_headers_get_one (soup_message_get_response_headers (message), "X-Mock-Trace-File"), ==, "server_logging_trace_failure_uri");
 	}
-	g_assert_cmpstr (soup_message_headers_get_one (message->response_headers, "X-Mock-Trace-File-Offset"), ==, "1");
-
-	g_object_unref (message);
+	g_assert_cmpstr (soup_message_headers_get_one (soup_message_get_response_headers (message), "X-Mock-Trace-File-Offset"), ==, "1");
 
 	g_main_loop_quit (data->main_loop);
 
@@ -624,28 +649,27 @@ test_server_logging_trace_failure_uri (LoggingData *data, gconstpointer user_dat
 static gboolean
 server_logging_trace_failure_unexpected_request_cb (LoggingData *data)
 {
-	SoupMessage *message;
-	SoupURI *uri;
+	g_autoptr(SoupMessage) message = NULL;
+	g_autoptr(GUri) uri = NULL;
+	g_autoptr(GBytes) body = NULL;
 
 	/* Load the trace. */
 	assert_server_load_trace (data->server, "server_logging_trace_failure_unexpected-request");
 
 	/* Dummy unit test code. */
-	uri = soup_uri_new ("https://example.com/test-file-unexpected"); /* Note: unexpected request; not in the trace file */
-	soup_uri_set_port (uri, uhm_server_get_port (data->server));
+	uri = g_uri_build (SOUP_HTTP_URI_FLAGS, "https", NULL, "example.com", uhm_server_get_port (data->server), "/test-file-unexpected", NULL, NULL); /* Note: unexpected request; not in the trace file */
 	message = soup_message_new_from_uri (SOUP_METHOD_GET, uri);
-	soup_uri_free (uri);
 
-	g_assert_cmpuint (soup_session_send_message (data->session, message), ==, SOUP_STATUS_BAD_REQUEST);
-	g_assert_cmpstr (message->response_body->data, !=, "The document was not found. Ha.");
-	g_assert_cmpstr (message->response_body->data, ==, "Expected no request, but got GET ‘/test-file-unexpected’.");
-	if (strstr (soup_message_headers_get_one (message->response_headers, "X-Mock-Trace-File"), "server_logging_trace_failure_unexpected-request") == NULL) {
+	g_signal_connect (message, "accept-certificate", G_CALLBACK (accept_cert), NULL);
+
+	g_assert_cmpuint (send_message (data->session, message, &body), ==, SOUP_STATUS_BAD_REQUEST);
+	g_assert_cmpstr (g_bytes_get_data (body, NULL), !=, "The document was not found. Ha.");
+	g_assert_cmpstr (g_bytes_get_data (body, NULL), ==, "Expected no request, but got GET ‘/test-file-unexpected’.");
+	if (strstr (soup_message_headers_get_one (soup_message_get_response_headers (message), "X-Mock-Trace-File"), "server_logging_trace_failure_unexpected-request") == NULL) {
 		/* Report the error. */
-		g_assert_cmpstr (soup_message_headers_get_one (message->response_headers, "X-Mock-Trace-File"), ==, "server_logging_trace_failure_unexpected-request");
+		g_assert_cmpstr (soup_message_headers_get_one (soup_message_get_response_headers (message), "X-Mock-Trace-File"), ==, "server_logging_trace_failure_unexpected-request");
 	}
-	g_assert_cmpstr (soup_message_headers_get_one (message->response_headers, "X-Mock-Trace-File-Offset"), ==, "0");
-
-	g_object_unref (message);
+	g_assert_cmpstr (soup_message_headers_get_one (soup_message_get_response_headers (message), "X-Mock-Trace-File-Offset"), ==, "0");
 
 	g_main_loop_quit (data->main_loop);
 
@@ -663,9 +687,7 @@ test_server_logging_trace_failure_unexpected_request (LoggingData *data, gconstp
 int
 main (int argc, char *argv[])
 {
-#if !GLIB_CHECK_VERSION (2, 35, 0)
-	g_type_init ();
-#endif
+	setlocale (LC_ALL, NULL);
 
 	g_test_init (&argc, &argv, NULL);
 	g_test_bug_base ("http://bugzilla.gnome.org/show_bug.cgi?id=");

@@ -21,6 +21,7 @@
 #include <locale.h>
 #include <string.h>
 #include <libsoup/soup.h>
+#include <locale.h>
 
 #include "uhm-resolver.h"
 
@@ -255,9 +256,7 @@ test_resolver_lookup_service_async (void)
 int
 main (int argc, char *argv[])
 {
-#if !GLIB_CHECK_VERSION (2, 35, 0)
-	g_type_init ();
-#endif
+	setlocale (LC_ALL, NULL);
 
 	g_test_init (&argc, &argv, NULL);
 	g_test_bug_base ("http://bugzilla.gnome.org/show_bug.cgi?id=");
