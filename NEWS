@@ -1,3 +1,42 @@
+Overview of changes from uhttpmock 0.10.0 to uhttpmock 0.11.0
+=============================================================
+
+* Bugs fixed:
+  - #14 Dump hosts during record (Jan-Michael Brummer)
+  - !13 Add Jan-Michael Brummer to doap file
+  - !14 Add HTTP/2 support
+  - !15 Add Location field support
+  - !17 Fix memory leak in uhm_message_finalize
+
+
+Overview of changes from uhttpmock 0.9.0 to uhttpmock 0.10.0
+============================================================
+
+* Bugs fixed:
+  - !11 Add PATCH request method
+  - !12 Add CONNECT request method
+
+
+Overview of changes from uhttpmock 0.5.5 to uhttpmock 0.9.0
+===========================================================
+
+This release ports the library to use libsoup 3.x. Note that
+you should stick to using the latest 0.5.x version if the
+tested piece of software still requires libsoup 2.x as the
+2 versions cannot be used in the same programme.
+
+Overview of changes from uhttpmock 0.5.4 to uhttpmock 0.5.5
+===========================================================
+
+This release fixes the gtk-doc directory containing the version
+number twice.
+
+Overview of changes from uhttpmock 0.5.3 to uhttpmock 0.5.4
+===========================================================
+
+This new release drops support for autotools, by using the
+meson build system, and older versions of libsoup 2.x.
+
 Overview of changes from uhttpmock 0.5.2 to uhttpmock 0.5.3
 ===========================================================
 

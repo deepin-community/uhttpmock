@@ -1,3 +1,40 @@
+uhttpmock (0.11.0-1) unstable; urgency=medium
+
+  * New upstream release
+  * Drop patch applied in new release
+
+ -- Jeremy Bícha <jbicha@ubuntu.com>  Wed, 10 Jul 2024 17:47:35 -0400
+
+uhttpmock (0.10.0-3) unstable; urgency=medium
+
+  * Cherry-pick a commit required by latest msgraph
+  * Bump Standards Version to 4.7.0
+  * Update debian/watch
+
+ -- Jeremy Bícha <jbicha@ubuntu.com>  Wed, 29 May 2024 11:03:51 -0400
+
+uhttpmock (0.10.0-2) unstable; urgency=medium
+
+  * Release to unstable
+
+ -- Jeremy Bícha <jbicha@ubuntu.com>  Sat, 23 Mar 2024 15:31:14 -0400
+
+uhttpmock (0.10.0-1) experimental; urgency=medium
+
+  * New upstream release
+  * Rename binary packages for API bump
+  * Build with libsoup3 instead of libsoup2.4
+  * Build with meson
+  * Build-Depend on dh-sequence-gir
+  * debian/libuhttpmock-1.0-1.symbols: Add new symbols
+  * debian/control: Set Rules-Requires-Root: no
+  * debian/copyright: Update
+  * Add debian/upstream/metadata
+  * Update upstream location for Homepage and debian/watch
+  * Update standards version to 4.6.2, no changes needed
+
+ -- Jeremy Bícha <jbicha@ubuntu.com>  Wed, 20 Mar 2024 16:48:39 -0400
+
 uhttpmock (0.5.3-2) unstable; urgency=medium
 
   * debian/control.in: Fix short description

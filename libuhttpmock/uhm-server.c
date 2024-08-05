@@ -44,10 +44,13 @@
  *  • Comparing mode (#UhmServer:enable-logging: %FALSE, #UhmServer:enable-online: %TRUE): Requests are sent to the real server online, and
  *    the request–response pairs are compared against those in an existing log file to see if the log file is up-to-date.
  *
+ * Starting with version 0.11.0 hosts are automatically extracted and stored in hosts trace files. These files are
+ * used during replay so no host configuration using uhm_resolver_add_A() is necessary in code any more.
+ * Requires libsoup 3.5.1 or higher. If that version of libsoup is not available, uhm_resolver_add_A() must continue
+ * to be used.
+ *
  * Since: 0.1.0
  */
-
-#include "config.h"
 
 #include <glib.h>
 #include <glib/gi18n.h>
@@ -61,6 +64,7 @@
 #include "uhm-default-tls-certificate.h"
 #include "uhm-resolver.h"
 #include "uhm-server.h"
+#include "uhm-message-private.h"
 
 GQuark
 uhm_server_error_quark (void)
@@ -73,15 +77,15 @@ static void uhm_server_finalize (GObject *object);
 static void uhm_server_get_property (GObject *object, guint property_id, GValue *value, GParamSpec *pspec);
 static void uhm_server_set_property (GObject *object, guint property_id, const GValue *value, GParamSpec *pspec);
 
-static gboolean real_handle_message (UhmServer *self, SoupMessage *message, SoupClientContext *client);
-static gboolean real_compare_messages (UhmServer *self, SoupMessage *expected_message, SoupMessage *actual_message, SoupClientContext *actual_client);
+static gboolean real_handle_message (UhmServer *self, UhmMessage *message);
+static gboolean real_compare_messages (UhmServer *self, UhmMessage *expected_message, UhmMessage *actual_message);
 
-static void server_handler_cb (SoupServer *server, SoupMessage *message, const gchar *path, GHashTable *query, SoupClientContext *client, gpointer user_data);
+static void server_handler_cb (SoupServer *server, SoupServerMessage *message, const gchar *path, GHashTable *query, gpointer user_data);
 static void load_file_stream_thread_cb (GTask *task, gpointer source_object, gpointer task_data, GCancellable *cancellable);
 static void load_file_iteration_thread_cb (GTask *task, gpointer source_object, gpointer task_data, GCancellable *cancellable);
 
 static GDataInputStream *load_file_stream (GFile *trace_file, GCancellable *cancellable, GError **error);
-static SoupMessage *load_file_iteration (GDataInputStream *input_stream, SoupURI *base_uri, GCancellable *cancellable, GError **error);
+static UhmMessage *load_file_iteration (GDataInputStream *input_stream, GUri *base_uri, GCancellable *cancellable, GError **error);
 
 static void apply_expected_domain_names (UhmServer *self);
 
@@ -97,20 +101,14 @@ struct _UhmServerPrivate {
 	UhmResolver *resolver;
 	GThread *server_thread;
 	GMainContext *server_context;
-#ifdef HAVE_LIBSOUP_2_47_3
 	GMainLoop *server_main_loop;
-#endif
 
 	/* TLS certificate. */
 	GTlsCertificate *tls_certificate;
 
 	/* Server interface. */
-#ifdef HAVE_LIBSOUP_2_47_3
 	GSocketAddress *address;  /* owned */
 	gchar *address_string;  /* owned; cache */
-#else
-	SoupAddress *address; /* owned */
-#endif
 	guint port;
 
 	/* Expected resolver domain names. */
@@ -119,12 +117,16 @@ struct _UhmServerPrivate {
 	GFile *trace_file;
 	GDataInputStream *input_stream;
 	GFileOutputStream *output_stream;
-	SoupMessage *next_message;
+	UhmMessage *next_message;
 	guint message_counter; /* ID of the message within the current trace file */
 
 	GFile *trace_directory;
 	gboolean enable_online;
 	gboolean enable_logging;
+
+	GFile *hosts_trace_file;
+	GFileOutputStream *hosts_output_stream;
+	GHashTable *hosts;
 
 	GByteArray *comparison_message;
 	enum {
@@ -291,7 +293,6 @@ uhm_server_class_init (UhmServerClass *klass)
 	 * UhmServer::handle-message:
 	 * @self: a #UhmServer
 	 * @message: a message containing the incoming HTTP(S) request, and which the outgoing HTTP(S) response should be set on
-	 * @client: additional data about the HTTP client making the request
 	 *
 	 * Emitted whenever the mock server is running and receives a request from a client. Test code may connect to this signal and implement a handler
 	 * which builds and returns a suitable response for a given message. The default handler reads a request–response pair from the current trace file,
@@ -305,37 +306,37 @@ uhm_server_class_init (UhmServerClass *klass)
 	                                               G_STRUCT_OFFSET (UhmServerClass, handle_message),
 	                                               g_signal_accumulator_true_handled, NULL,
 	                                               g_cclosure_marshal_generic,
-	                                               G_TYPE_BOOLEAN, 2,
-	                                               SOUP_TYPE_MESSAGE, SOUP_TYPE_CLIENT_CONTEXT);
+	                                               G_TYPE_BOOLEAN, 1,
+	                                               UHM_TYPE_MESSAGE);
 
 	/**
 	 * UhmServer::compare-messages:
 	 * @self: a #UhmServer
 	 * @expected_message: a message containing the expected HTTP(S) message provided by #UhmServer::handle-message
 	 * @actual_message: a message containing the incoming HTTP(S) request
-	 * @actual_client: additional data about the HTTP client making the request
 	 *
-	 * Emitted whenever the mock server must compare two #SoupMessage<!-- -->s for equality; e.g. when in the testing or comparison modes.
+	 * Emitted whenever the mock server must compare two #UhmMessage<!-- -->s for equality; e.g. when in the testing or comparison modes.
 	 * Test code may connect to this signal and implement a handler which checks custom properties of the messages. The default handler compares
 	 * the URI and method of the messages, but no headers and not the message bodies.
 	 *
 	 * Signal handlers should return %TRUE if the messages match; and %FALSE otherwise. The first signal handler executed when
 	 * this signal is emitted wins.
 	 *
-	 * Since: 0.1.0
+	 * Since: 1.0.0
 	 */
 	signals[SIGNAL_COMPARE_MESSAGES] = g_signal_new ("compare-messages", G_OBJECT_CLASS_TYPE (klass), G_SIGNAL_RUN_LAST,
 	                                               G_STRUCT_OFFSET (UhmServerClass, compare_messages),
 	                                               g_signal_accumulator_first_wins, NULL,
 	                                               g_cclosure_marshal_generic,
-	                                               G_TYPE_BOOLEAN, 3,
-	                                               SOUP_TYPE_MESSAGE, SOUP_TYPE_MESSAGE, SOUP_TYPE_CLIENT_CONTEXT);
+	                                               G_TYPE_BOOLEAN, 2,
+	                                               UHM_TYPE_MESSAGE, UHM_TYPE_MESSAGE);
 }
 
 static void
 uhm_server_init (UhmServer *self)
 {
 	self->priv = uhm_server_get_instance_private (self);
+	self->priv->hosts = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
 }
 
 static void
@@ -346,7 +347,9 @@ uhm_server_dispose (GObject *object)
 	g_clear_object (&priv->resolver);
 	g_clear_object (&priv->server);
 	g_clear_pointer (&priv->server_context, g_main_context_unref);
-	g_clear_object (&priv->input_stream);
+	g_clear_pointer (&priv->hosts, g_hash_table_unref);
+	g_clear_object (&priv->hosts_trace_file);
+	g_clear_object (&priv->hosts_output_stream);
 	g_clear_object (&priv->trace_file);
 	g_clear_object (&priv->input_stream);
 	g_clear_object (&priv->output_stream);
@@ -436,41 +439,44 @@ uhm_server_set_property (GObject *object, guint property_id, const GValue *value
 
 typedef struct {
 	GDataInputStream *input_stream;
-	SoupURI *base_uri;
+	GUri *base_uri;
 } LoadFileIterationData;
 
 static void
 load_file_iteration_data_free (LoadFileIterationData *data)
 {
 	g_object_unref (data->input_stream);
-	soup_uri_free (data->base_uri);
+	g_uri_unref (data->base_uri);
 	g_slice_free (LoadFileIterationData, data);
 }
 
-static SoupURI * /* transfer full */
+static char *
+uri_get_path_query (GUri *uri)
+{
+	const char *path = g_uri_get_path (uri);
+	return g_strconcat (path[0] ? path : "/", g_uri_get_query (uri), NULL);
+}
+
+static GUri * /* transfer full */
 build_base_uri (UhmServer *self)
 {
 	UhmServerPrivate *priv = self->priv;
 	gchar *base_uri_string;
-	SoupURI *base_uri;
+	GUri *base_uri;
 
 	if (priv->enable_online == FALSE) {
-#ifdef HAVE_LIBSOUP_2_47_3
 		GSList *uris;  /* owned */
 		uris = soup_server_get_uris (priv->server);
 		if (uris == NULL) {
 			return NULL;
 		}
-		base_uri_string = soup_uri_to_string (uris->data, FALSE);
-		g_slist_free_full (uris, (GDestroyNotify) soup_uri_free);
-#else
-		base_uri_string = g_strdup_printf ("https://%s:%u", soup_address_get_physical (self->priv->address), self->priv->port);
-#endif
+		base_uri_string = g_uri_to_string_partial (uris->data, G_URI_HIDE_PASSWORD);
+		g_slist_free_full (uris, (GDestroyNotify) g_uri_unref);
 	} else {
 		base_uri_string = g_strdup ("https://localhost"); /* arbitrary */
 	}
 
-	base_uri = soup_uri_new (base_uri_string);
+	base_uri = g_uri_parse (base_uri_string, SOUP_HTTP_URI_FLAGS, NULL);
 	g_free (base_uri_string);
 
 	return base_uri;
@@ -487,24 +493,24 @@ parts_equal (const char *one, const char *two, gboolean insensitive)
 }
 
 static gboolean
-real_compare_messages (UhmServer *server, SoupMessage *expected_message, SoupMessage *actual_message, SoupClientContext *actual_client)
+real_compare_messages (UhmServer *server, UhmMessage *expected_message, UhmMessage *actual_message)
 {
-	SoupURI *expected_uri, *actual_uri;
+	GUri *expected_uri, *actual_uri;
 
 	/* Compare method. */
-	if (g_strcmp0 (expected_message->method, actual_message->method) != 0) {
+	if (g_strcmp0 (uhm_message_get_method (expected_message), uhm_message_get_method (actual_message)) != 0) {
 		return FALSE;
 	}
 
 	/* Compare URIs. */
-	expected_uri = soup_message_get_uri (expected_message);
-	actual_uri = soup_message_get_uri (actual_message);
+	expected_uri = uhm_message_get_uri (expected_message);
+	actual_uri = uhm_message_get_uri (actual_message);
 
-	if (!parts_equal (expected_uri->user, actual_uri->user, FALSE) ||
-	    !parts_equal (expected_uri->password, actual_uri->password, FALSE) ||
-	    !parts_equal (expected_uri->path, actual_uri->path, FALSE) ||
-	    !parts_equal (expected_uri->query, actual_uri->query, FALSE) ||
-	    !parts_equal (expected_uri->fragment, actual_uri->fragment, FALSE)) {
+	if (!parts_equal (g_uri_get_user (expected_uri), g_uri_get_user (actual_uri), FALSE) ||
+	    !parts_equal (g_uri_get_password (expected_uri), g_uri_get_password (actual_uri), FALSE) ||
+	    !parts_equal (g_uri_get_path (expected_uri), g_uri_get_path (actual_uri), FALSE) ||
+	    !parts_equal (g_uri_get_query (expected_uri), g_uri_get_query (actual_uri), FALSE) ||
+	    !parts_equal (g_uri_get_fragment (expected_uri), g_uri_get_fragment (actual_uri), FALSE)) {
 		return FALSE;
 	}
 
@@ -513,11 +519,11 @@ real_compare_messages (UhmServer *server, SoupMessage *expected_message, SoupMes
 
 /* strcmp()-like return value: 0 means the messages compare equal. */
 static gint
-compare_incoming_message (UhmServer *self, SoupMessage *expected_message, SoupMessage *actual_message, SoupClientContext *actual_client)
+compare_incoming_message (UhmServer *self, UhmMessage *expected_message, UhmMessage *actual_message)
 {
 	gboolean messages_equal = FALSE;
 
-	g_signal_emit (self, signals[SIGNAL_COMPARE_MESSAGES], 0, expected_message, actual_message, actual_client, &messages_equal);
+	g_signal_emit (self, signals[SIGNAL_COMPARE_MESSAGES], 0, expected_message, actual_message, &messages_equal);
 
 	return (messages_equal == TRUE) ? 0 : 1;
 }
@@ -525,48 +531,53 @@ compare_incoming_message (UhmServer *self, SoupMessage *expected_message, SoupMe
 static void
 header_append_cb (const gchar *name, const gchar *value, gpointer user_data)
 {
-	SoupMessage *message = user_data;
+	UhmMessage *message = user_data;
 
-	soup_message_headers_append (message->response_headers, name, value);
+	soup_message_headers_append (uhm_message_get_response_headers (message), name, value);
 }
 
 static void
-server_response_append_headers (UhmServer *self, SoupMessage *message)
+server_response_append_headers (UhmServer *self, UhmMessage *message)
 {
 	UhmServerPrivate *priv = self->priv;
 	gchar *trace_file_name, *trace_file_offset;
 
 	trace_file_name = g_file_get_uri (priv->trace_file);
-	soup_message_headers_append (message->response_headers, "X-Mock-Trace-File", trace_file_name);
+	soup_message_headers_append (uhm_message_get_response_headers (message), "X-Mock-Trace-File", trace_file_name);
 	g_free (trace_file_name);
 
 	trace_file_offset = g_strdup_printf ("%u", priv->message_counter);
-	soup_message_headers_append (message->response_headers, "X-Mock-Trace-File-Offset", trace_file_offset);
+	soup_message_headers_append (uhm_message_get_response_headers (message), "X-Mock-Trace-File-Offset", trace_file_offset);
 	g_free (trace_file_offset);
 }
 
 static void
-server_process_message (UhmServer *self, SoupMessage *message, SoupClientContext *client)
+server_process_message (UhmServer *self, UhmMessage *message)
 {
 	UhmServerPrivate *priv = self->priv;
-	SoupBuffer *message_body;
+	g_autoptr(GBytes) message_body = NULL;
 	goffset expected_content_length;
+	g_autoptr(GError) error = NULL;
+	const char *location_header = NULL;
 
 	g_assert (priv->next_message != NULL);
 	priv->message_counter++;
 
-	if (compare_incoming_message (self, priv->next_message, message, client) != 0) {
+	if (compare_incoming_message (self, priv->next_message, message) != 0) {
 		gchar *body, *next_uri, *actual_uri;
 
 		/* Received message is not what we expected. Return an error. */
-		soup_message_set_status_full (message, SOUP_STATUS_BAD_REQUEST, "Unexpected request to mock server");
+		uhm_message_set_status (message, SOUP_STATUS_BAD_REQUEST,
+		                        "Unexpected request to mock server");
 
-		next_uri = soup_uri_to_string (soup_message_get_uri (priv->next_message), TRUE);
-		actual_uri = soup_uri_to_string (soup_message_get_uri (message), TRUE);
-		body = g_strdup_printf ("Expected %s URI ‘%s’, but got %s ‘%s’.", priv->next_message->method, next_uri, message->method, actual_uri);
+		next_uri = uri_get_path_query (uhm_message_get_uri (priv->next_message));
+		actual_uri = uri_get_path_query (uhm_message_get_uri (message));
+		body = g_strdup_printf ("Expected %s URI ‘%s’, but got %s ‘%s’.",
+		                        uhm_message_get_method (priv->next_message),
+		                        next_uri, uhm_message_get_method (message), actual_uri);
 		g_free (actual_uri);
 		g_free (next_uri);
-		soup_message_body_append_take (message->response_body, (guchar *) body, strlen (body));
+		soup_message_body_append_take (uhm_message_get_response_body (message), (guchar *) body, strlen (body) + 1);
 
 		server_response_append_headers (self, message);
 
@@ -574,52 +585,83 @@ server_process_message (UhmServer *self, SoupMessage *message, SoupClientContext
 	}
 
 	/* The incoming message matches what we expected, so copy the headers and body from the expected response and return it. */
-	soup_message_set_http_version (message, soup_message_get_http_version (priv->next_message));
-	soup_message_set_status_full (message, priv->next_message->status_code, priv->next_message->reason_phrase);
-	soup_message_headers_foreach (priv->next_message->response_headers, header_append_cb, message);
+	uhm_message_set_http_version (message, uhm_message_get_http_version (priv->next_message));
+	uhm_message_set_status (message, uhm_message_get_status (priv->next_message),
+	                        uhm_message_get_reason_phrase (priv->next_message));
+
+	/* Rewrite Location headers to use the uhttpmock server details */
+	location_header = soup_message_headers_get_one (uhm_message_get_response_headers (priv->next_message), "Location");
+	if (location_header) {
+		g_autoptr(GUri) uri = NULL;
+		g_autoptr(GUri) modified_uri = NULL;
+		g_autofree char *uri_str = NULL;
+
+		uri = g_uri_parse (location_header, G_URI_FLAGS_ENCODED, &error);
+		if (uri) {
+			modified_uri = g_uri_build (G_URI_FLAGS_ENCODED,
+				                    g_uri_get_scheme (uri),
+				                    g_uri_get_userinfo (uri),
+				                    g_uri_get_host (uri),
+				                    priv->port,
+				                    g_uri_get_path (uri),
+				                    g_uri_get_query (uri),
+				                    g_uri_get_fragment (uri));
+
+			uri_str = g_uri_to_string (modified_uri);
+			soup_message_headers_replace (uhm_message_get_response_headers (priv->next_message), "Location", uri_str);
+		} else {
+			g_debug ("Failed to rewrite Location header ‘%s’ to use new port", location_header);
+		}
+	}
+	soup_message_headers_foreach (uhm_message_get_response_headers (priv->next_message), header_append_cb, message);
 
 	/* Add debug headers to identify the message and trace file. */
 	server_response_append_headers (self, message);
 
-	message_body = soup_message_body_flatten (priv->next_message->response_body);
-	if (message_body->length > 0) {
-		soup_message_body_append_buffer (message->response_body, message_body);
-	}
+	message_body = soup_message_body_flatten (uhm_message_get_response_body (priv->next_message));
+	if (g_bytes_get_size (message_body) > 0)
+		soup_message_body_append_bytes (uhm_message_get_response_body (message), message_body);
 
 	/* If the log file doesn't contain the full response body (e.g. because it's a huge binary file containing a nul byte somewhere),
 	 * make one up (all zeros). */
-	expected_content_length = soup_message_headers_get_content_length (message->response_headers);
-	if (expected_content_length > 0 && message_body->length < (guint64) expected_content_length) {
+	expected_content_length = soup_message_headers_get_content_length (uhm_message_get_response_headers (message));
+	if (expected_content_length > 0 && g_bytes_get_size (message_body) < (gsize) expected_content_length) {
 		guint8 *buf;
 
-		buf = g_malloc0 (expected_content_length - message_body->length);
-		soup_message_body_append_take (message->response_body, buf, expected_content_length - message_body->length);
+		buf = g_malloc0 (expected_content_length - g_bytes_get_size (message_body));
+		soup_message_body_append_take (uhm_message_get_response_body (message), buf, expected_content_length - g_bytes_get_size (message_body));
 	}
 
-	soup_buffer_free (message_body);
-
-	soup_message_body_complete (message->response_body);
+	soup_message_body_complete (uhm_message_get_response_body (message));
 
 	/* Clear the expected message. */
 	g_clear_object (&priv->next_message);
 }
 
 static void
-server_handler_cb (SoupServer *server, SoupMessage *message, const gchar *path, GHashTable *query, SoupClientContext *client, gpointer user_data)
+server_handler_cb (SoupServer *server, SoupServerMessage *message, const gchar *path, GHashTable *query, gpointer user_data)
 {
 	UhmServer *self = user_data;
+	UhmMessage *umsg;
 	gboolean message_handled = FALSE;
 
-	soup_server_pause_message (server, message);
-	g_signal_emit (self, signals[SIGNAL_HANDLE_MESSAGE], 0, message, client, &message_handled);
-	soup_server_unpause_message (server, message);
+	soup_server_message_pause (message);
+	umsg = uhm_message_new_from_server_message (message);
+
+	g_signal_emit (self, signals[SIGNAL_HANDLE_MESSAGE], 0, umsg, &message_handled);
+
+	soup_server_message_set_http_version (message, uhm_message_get_http_version (umsg));
+	soup_server_message_set_status (message, uhm_message_get_status (umsg), uhm_message_get_reason_phrase (umsg));
+
+	g_object_unref (umsg);
+	soup_server_message_unpause (message);
 
 	/* The message should always be handled by real_handle_message() at least. */
 	g_assert (message_handled == TRUE);
 }
 
 static gboolean
-real_handle_message (UhmServer *self, SoupMessage *message, SoupClientContext *client)
+real_handle_message (UhmServer *self, UhmMessage *message)
 {
 	UhmServerPrivate *priv = self->priv;
 	gboolean handled = FALSE;
@@ -646,10 +688,11 @@ real_handle_message (UhmServer *self, SoupMessage *message, SoupClientContext *c
 		if (child_error != NULL) {
 			gchar *body;
 
-			soup_message_set_status_full (message, SOUP_STATUS_INTERNAL_SERVER_ERROR, "Error loading expected request");
+			uhm_message_set_status (message, SOUP_STATUS_INTERNAL_SERVER_ERROR,
+			                        "Error loading expected request");
 
 			body = g_strdup_printf ("Error: %s", child_error->message);
-			soup_message_body_append_take (message->response_body, (guchar *) body, strlen (body));
+			soup_message_body_append_take (uhm_message_get_response_body (message), (guchar *) body, strlen (body) + 1);
 			handled = TRUE;
 
 			g_error_free (child_error);
@@ -659,12 +702,13 @@ real_handle_message (UhmServer *self, SoupMessage *message, SoupClientContext *c
 			gchar *body, *actual_uri;
 
 			/* Received message is not what we expected. Return an error. */
-			soup_message_set_status_full (message, SOUP_STATUS_BAD_REQUEST, "Unexpected request to mock server");
+			uhm_message_set_status (message, SOUP_STATUS_BAD_REQUEST,
+			                        "Unexpected request to mock server");
 
-			actual_uri = soup_uri_to_string (soup_message_get_uri (message), TRUE);
-			body = g_strdup_printf ("Expected no request, but got %s ‘%s’.", message->method, actual_uri);
+			actual_uri = uri_get_path_query (uhm_message_get_uri (message));
+			body = g_strdup_printf ("Expected no request, but got %s ‘%s’.", uhm_message_get_method (message), actual_uri);
 			g_free (actual_uri);
-			soup_message_body_append_take (message->response_body, (guchar *) body, strlen (body));
+			soup_message_body_append_take (uhm_message_get_response_body (message), (guchar *) body, strlen (body) + 1);
 			handled = TRUE;
 
 			server_response_append_headers (self, message);
@@ -674,7 +718,7 @@ real_handle_message (UhmServer *self, SoupMessage *message, SoupClientContext *c
 	/* Process the actual message if we already know the expected message. */
 	g_assert (priv->next_message != NULL || handled == TRUE);
 	if (handled == FALSE) {
-		server_process_message (self, message, client);
+		server_process_message (self, message);
 		handled = TRUE;
 	}
 
@@ -788,15 +832,15 @@ error:
 }
 
 /* base_uri is the base URI for the server, e.g. https://127.0.0.1:1431. */
-static SoupMessage *
-trace_to_soup_message (const gchar *trace, SoupURI *base_uri)
+static UhmMessage *
+trace_to_soup_message (const gchar *trace, GUri *base_uri)
 {
-	SoupMessage *message = NULL;
+	UhmMessage *message = NULL;
 	const gchar *i, *j, *method;
 	gchar *uri_string, *response_message;
 	SoupHTTPVersion http_version;
 	guint response_status;
-	SoupURI *uri;
+	g_autoptr(GUri) uri = NULL;
 
 	g_return_val_if_fail (trace != NULL, NULL);
 
@@ -839,6 +883,12 @@ trace_to_soup_message (const gchar *trace, SoupURI *base_uri)
 	} else if (strncmp (trace, "PUT", strlen ("PUT")) == 0) {
 		method = SOUP_METHOD_PUT;
 		trace += strlen ("PUT");
+	} else if (strncmp (trace, "PATCH", strlen ("PATCH")) == 0) {
+		method = "PATCH";
+		trace += strlen ("PATCH");
+	} else if (strncmp (trace, "CONNECT", strlen ("CONNECT")) == 0) {
+		method = "CONNECT";
+		trace += strlen ("CONNECT");
 	} else {
 		g_warning ("Unknown method ‘%s’.", trace);
 		goto error;
@@ -865,6 +915,9 @@ trace_to_soup_message (const gchar *trace, SoupURI *base_uri)
 	} else if (strncmp (trace, "HTTP/1.0", strlen ("HTTP/1.0")) == 0) {
 		http_version = SOUP_HTTP_1_0;
 		trace += strlen ("HTTP/1.0");
+	} else if (strncmp (trace, "HTTP/2", strlen ("HTTP/2")) == 0) {
+		http_version = SOUP_HTTP_2_0;
+		trace += strlen ("HTTP/2");
 	} else {
 		g_warning ("Unrecognised HTTP version ‘%s’.", trace);
 		http_version = SOUP_HTTP_1_1;
@@ -877,20 +930,19 @@ trace_to_soup_message (const gchar *trace, SoupURI *base_uri)
 	trace++;
 
 	/* Build the message. */
-	uri = soup_uri_new_with_base (base_uri, uri_string);
-	message = soup_message_new_from_uri (method, uri);
-	soup_uri_free (uri);
+	uri = g_uri_parse_relative (base_uri, uri_string, SOUP_HTTP_URI_FLAGS, NULL);
+	message = uhm_message_new_from_uri (method, uri);
 
 	if (message == NULL) {
 		g_warning ("Invalid URI ‘%s’.", uri_string);
 		goto error;
 	}
 
-	soup_message_set_http_version (message, http_version);
+	uhm_message_set_http_version (message, http_version);
 	g_free (uri_string);
 
 	/* Parse the request headers and body. */
-	if (trace_to_soup_message_headers_and_body (message->request_headers, message->request_body, '>', &trace) == FALSE) {
+	if (trace_to_soup_message_headers_and_body (uhm_message_get_request_headers (message), uhm_message_get_request_body (message), '>', &trace) == FALSE) {
 		goto error;
 	}
 
@@ -907,6 +959,9 @@ trace_to_soup_message (const gchar *trace, SoupURI *base_uri)
 	} else if (strncmp (trace, "HTTP/1.0", strlen ("HTTP/1.0")) == 0) {
 		http_version = SOUP_HTTP_1_0;
 		trace += strlen ("HTTP/1.0");
+	} else if (strncmp (trace, "HTTP/2", strlen ("HTTP/2")) == 0) {
+		http_version = SOUP_HTTP_2_0;
+		trace += strlen ("HTTP/2");
 	} else {
 		g_warning ("Unrecognised HTTP version ‘%s’.", trace);
 	}
@@ -939,12 +994,12 @@ trace_to_soup_message (const gchar *trace, SoupURI *base_uri)
 	response_message = g_strndup (trace, i - trace);
 	trace += (i - trace) + 1;
 
-	soup_message_set_status_full (message, response_status, response_message);
+	uhm_message_set_status (message, response_status, response_message);
 
 	g_free (response_message);
 
 	/* Parse the response headers and body. */
-	if (trace_to_soup_message_headers_and_body (message->response_headers, message->response_body, '<', &trace) == FALSE) {
+	if (trace_to_soup_message_headers_and_body (uhm_message_get_response_headers (message), uhm_message_get_response_body (message), '<', &trace) == FALSE) {
 		goto error;
 	}
 
@@ -1011,33 +1066,10 @@ load_message_half (GDataInputStream *input_stream, GString *current_message, GCa
 	}
 }
 
-/* Returns TRUE iff the given message from a trace file should be ignored and not used by the mock server. */
-static gboolean
-should_ignore_soup_message (SoupMessage *message)
+static UhmMessage *
+load_file_iteration (GDataInputStream *input_stream, GUri *base_uri, GCancellable *cancellable, GError **error)
 {
-	switch (message->status_code) {
-		case SOUP_STATUS_NONE:
-		case SOUP_STATUS_CANCELLED:
-		case SOUP_STATUS_CANT_RESOLVE:
-		case SOUP_STATUS_CANT_RESOLVE_PROXY:
-		case SOUP_STATUS_CANT_CONNECT:
-		case SOUP_STATUS_CANT_CONNECT_PROXY:
-		case SOUP_STATUS_SSL_FAILED:
-		case SOUP_STATUS_IO_ERROR:
-		case SOUP_STATUS_MALFORMED:
-		case SOUP_STATUS_TRY_AGAIN:
-		case SOUP_STATUS_TOO_MANY_REDIRECTS:
-		case SOUP_STATUS_TLS_FAILED:
-			return TRUE;
-		default:
-			return FALSE;
-	}
-}
-
-static SoupMessage *
-load_file_iteration (GDataInputStream *input_stream, SoupURI *base_uri, GCancellable *cancellable, GError **error)
-{
-	SoupMessage *output_message = NULL;
+	UhmMessage *output_message = NULL;
 	GString *current_message = NULL;
 
 	current_message = g_string_new (NULL);
@@ -1058,7 +1090,7 @@ load_file_iteration (GDataInputStream *input_stream, SoupURI *base_uri, GCancell
 			/* Reached the end of the file. */
 			output_message = NULL;
 		}
-	} while (output_message != NULL && should_ignore_soup_message (output_message) == TRUE);
+	} while (output_message != NULL && uhm_message_get_status (output_message) == SOUP_STATUS_NONE);
 
 done:
 	/* Tidy up. */
@@ -1094,8 +1126,8 @@ load_file_iteration_thread_cb (GTask *task, gpointer source_object, gpointer tas
 {
 	LoadFileIterationData *data = task_data;
 	GDataInputStream *input_stream;
-	SoupMessage *output_message;
-	SoupURI *base_uri;
+	UhmMessage *output_message;
+	GUri *base_uri;
 	GError *child_error = NULL;
 
 	input_stream = data->input_stream;
@@ -1156,7 +1188,13 @@ void
 uhm_server_load_trace (UhmServer *self, GFile *trace_file, GCancellable *cancellable, GError **error)
 {
 	UhmServerPrivate *priv = self->priv;
-	SoupURI *base_uri;
+	g_autoptr(GUri) base_uri = NULL;
+	g_autoptr(GError) local_error = NULL;
+	g_autofree char *content = NULL;
+	g_autofree char *trace_path = NULL;
+	g_autofree char *trace_hosts = NULL;
+	g_auto(GStrv) split = NULL;
+	gsize len;
 
 	g_return_if_fail (UHM_IS_SERVER (self));
 	g_return_if_fail (G_IS_FILE (trace_file));
@@ -1166,6 +1204,7 @@ uhm_server_load_trace (UhmServer *self, GFile *trace_file, GCancellable *cancell
 
 	base_uri = build_base_uri (self);
 
+	/* Trace File */
 	priv->trace_file = g_object_ref (trace_file);
 	priv->input_stream = load_file_stream (priv->trace_file, cancellable, error);
 
@@ -1180,19 +1219,41 @@ uhm_server_load_trace (UhmServer *self, GFile *trace_file, GCancellable *cancell
 		if (child_error != NULL) {
 			g_clear_object (&priv->trace_file);
 			g_propagate_error (error, child_error);
+			return;
 		}
 	} else {
 		/* Error. */
 		g_clear_object (&priv->trace_file);
+		return;
 	}
 
-	soup_uri_free (base_uri);
+	/* Host file */
+	trace_path = g_file_get_path (trace_file);
+	trace_hosts = g_strconcat (trace_path, ".hosts", NULL);
+	priv->hosts_trace_file = g_file_new_for_path (trace_hosts);
+
+	if (g_file_load_contents (priv->hosts_trace_file, cancellable, &content, &len, NULL, &local_error)) {
+		split = g_strsplit (content, "\n", -1);
+		for (gsize i = 0; split != NULL && split[i] != NULL; i++) {
+			if (*(split[i]) != '\0') {
+				uhm_resolver_add_A (priv->resolver, split[i], uhm_server_get_address (self));
+			}
+		}
+	} else if (g_error_matches (local_error, G_IO_ERROR, G_IO_ERROR_NOT_FOUND)) {
+		/* It's not fatal that this file cannot be loaded as these hosts can be added in code */
+		g_clear_error (&local_error);
+
+	} else {
+		/* Other I/O errors are fatal. */
+		g_propagate_error (error, g_steal_pointer (&local_error));
+		return;
+	}
 }
 
 typedef struct {
 	GAsyncReadyCallback callback;
 	gpointer user_data;
-	SoupURI *base_uri;
+	GUri *base_uri;
 } LoadTraceData;
 
 static void
@@ -1299,11 +1360,7 @@ server_thread_quit_cb (gpointer user_data)
 	UhmServer *self = user_data;
 	UhmServerPrivate *priv = self->priv;
 
-#ifdef HAVE_LIBSOUP_2_47_3
 	g_main_loop_quit (priv->server_main_loop);
-#else
-	soup_server_quit (priv->server);
-#endif
 
 	return G_SOURCE_REMOVE;
 }
@@ -1317,11 +1374,7 @@ server_thread_cb (gpointer user_data)
 	g_main_context_push_thread_default (priv->server_context);
 
 	/* Run the server. This will create a main loop and iterate the server_context until soup_server_quit() is called. */
-#ifdef HAVE_LIBSOUP_2_47_3
 	g_main_loop_run (priv->server_main_loop);
-#else
-	soup_server_run (priv->server);
-#endif
 
 	g_main_context_pop_thread_default (priv->server_context);
 
@@ -1347,67 +1400,35 @@ void
 uhm_server_run (UhmServer *self)
 {
 	UhmServerPrivate *priv = self->priv;
-#ifndef HAVE_LIBSOUP_2_47_3
-	union {
-		struct sockaddr sock;
-		struct sockaddr_in in;
-	} sock;
-	SoupAddress *addr;
-#endif
+	g_autoptr(GError) error = NULL;
+	GSList *sockets;  /* owned */
+	GSocket *socket;
 
 	g_return_if_fail (UHM_IS_SERVER (self));
 	g_return_if_fail (priv->resolver == NULL);
 	g_return_if_fail (priv->server == NULL);
-
-#ifndef HAVE_LIBSOUP_2_47_3
-	/* Grab a loopback IP to use. */
-	memset (&sock, 0, sizeof (sock));
-	sock.in.sin_family = AF_INET;
-	sock.in.sin_addr.s_addr = htonl (INADDR_LOOPBACK);
-	sock.in.sin_port = htons (0); /* random port */
-
-	addr = soup_address_new_from_sockaddr (&sock.sock, sizeof (sock));
-	g_assert (addr != NULL);
-#endif
 
 	/* Set up the server. If (priv->tls_certificate != NULL) it will be a HTTPS server;
 	 * otherwise it will be a HTTP server. */
 	priv->server_context = g_main_context_new ();
 	priv->server = soup_server_new ("tls-certificate", priv->tls_certificate,
 	                                "raw-paths", TRUE,
-#ifndef HAVE_LIBSOUP_2_47_3
-	                                "async-context", priv->server_context,
-	                                "interface", addr,
-#endif
 	                                NULL);
 	soup_server_add_handler (priv->server, "/", server_handler_cb, self, NULL);
 
-#ifndef HAVE_LIBSOUP_2_47_3
-	g_object_unref (addr);
-#endif
-
-#ifdef HAVE_LIBSOUP_2_47_3
-{
-	GError *error = NULL;
-
 	g_main_context_push_thread_default (priv->server_context);
 
+	/* Try listening on either IPv4 or IPv6. If that fails, try on IPv4 only
+	 * as listening on IPv6 while inside a Docker container (as happens in
+	 * CI) can fail if the container isn’t bridged properly. */
 	priv->server_main_loop = g_main_loop_new (priv->server_context, FALSE);
-	soup_server_listen_local (priv->server, 0, (priv->tls_certificate != NULL) ? SOUP_SERVER_LISTEN_HTTPS : 0,
-	                          &error);
+	if (!soup_server_listen_local (priv->server, 0, (priv->tls_certificate != NULL) ? SOUP_SERVER_LISTEN_HTTPS : 0, NULL))
+		soup_server_listen_local (priv->server, 0, SOUP_SERVER_LISTEN_IPV4_ONLY | ((priv->tls_certificate != NULL) ? SOUP_SERVER_LISTEN_HTTPS : 0), &error);
 	g_assert_no_error (error);  /* binding to localhost should never really fail */
 
 	g_main_context_pop_thread_default (priv->server_context);
-}
-#endif
 
 	/* Grab the randomly selected address and port. */
-#ifdef HAVE_LIBSOUP_2_47_3
-{
-	GSList *sockets;  /* owned */
-	GSocket *socket;
-	GError *error = NULL;
-
 	sockets = soup_server_get_listeners (priv->server);
 	g_assert (sockets != NULL);
 
@@ -1417,11 +1438,6 @@ uhm_server_run (UhmServer *self)
 	priv->port = g_inet_socket_address_get_port (G_INET_SOCKET_ADDRESS (priv->address));
 
 	g_slist_free (sockets);
-}
-#else
-	priv->address = g_object_ref (soup_socket_get_local_address (soup_server_get_listener (priv->server)));
-	priv->port = soup_server_get_port (priv->server);
-#endif
 
 	/* Set up the resolver. It is expected that callers will grab the resolver (by calling uhm_server_get_resolver())
 	 * immediately after this function returns, and add some expected hostnames by calling uhm_resolver_add_A() one or
@@ -1475,18 +1491,14 @@ uhm_server_stop (UhmServer *self)
 	priv->server_thread = NULL;
 	uhm_resolver_reset (priv->resolver);
 
-#ifdef HAVE_LIBSOUP_2_47_3
 	g_clear_pointer (&priv->server_main_loop, g_main_loop_unref);
-#endif
 	g_clear_pointer (&priv->server_context, g_main_context_unref);
 	g_clear_object (&priv->server);
 	g_clear_object (&priv->resolver);
 
 	g_clear_object (&priv->address);
-#ifdef HAVE_LIBSOUP_2_47_3
 	g_free (priv->address_string);
 	priv->address_string = NULL;
-#endif
 	priv->port = 0;
 
 	g_object_freeze_notify (G_OBJECT (self));
@@ -1609,26 +1621,40 @@ uhm_server_start_trace_full (UhmServer *self, GFile *trace_file, GError **error)
 	}
 	g_return_if_fail (priv->output_stream == NULL);
 
+	if (priv->enable_online == TRUE) {
+		priv->message_counter = 0;
+	    priv->comparison_message = g_byte_array_new ();
+		priv->received_message_state = UNKNOWN;
+	}
+
 	/* Start writing out a trace file if logging is enabled. */
 	if (priv->enable_logging == TRUE) {
 		GFileOutputStream *output_stream;
+		g_autofree char *trace_path = g_file_get_path (trace_file);
+		g_autofree char *trace_hosts = g_strconcat (trace_path, ".hosts", NULL);
+		priv->hosts_trace_file = g_file_new_for_path (trace_hosts);
 
 		output_stream = g_file_replace (trace_file, NULL, FALSE, G_FILE_CREATE_NONE, NULL, &child_error);
 
 		if (child_error != NULL) {
-			gchar *trace_file_path;
-
-			trace_file_path = g_file_get_path (trace_file);
-			g_set_error (error, child_error->domain, child_error->code,
-			             "Error replacing trace file ‘%s’: %s", trace_file_path, child_error->message);
-			g_free (trace_file_path);
-
-			g_error_free (child_error);
-
+			g_propagate_prefixed_error (error, g_steal_pointer (&child_error),
+			             "Error replacing trace file ‘%s’: ", trace_path);
 			return;
 		} else {
 			/* Change state. */
 			priv->output_stream = output_stream;
+		}
+
+		/* Host trace file */
+		output_stream = g_file_replace (priv->hosts_trace_file, NULL, FALSE, G_FILE_CREATE_NONE, NULL, &child_error);
+		if (child_error != NULL) {
+			g_autofree char *hosts_trace_file_path = g_file_get_path (priv->hosts_trace_file);
+			g_propagate_prefixed_error (error, g_steal_pointer (&child_error),
+			             "Error replacing trace hosts file ‘%s’: ", hosts_trace_file_path);
+			return;
+		} else {
+			/* Change state. */
+			priv->hosts_output_stream = output_stream;
 		}
 	}
 
@@ -1694,6 +1720,7 @@ uhm_server_end_trace (UhmServer *self)
 
 	if (priv->enable_logging == TRUE) {
 		g_clear_object (&self->priv->output_stream);
+		g_clear_object (&self->priv->hosts_output_stream);
 	}
 }
 
@@ -1797,6 +1824,8 @@ uhm_server_received_message_chunk (UhmServer *self, const gchar *message_chunk, 
 {
 	UhmServerPrivate *priv = self->priv;
 	GError *child_error = NULL;
+	g_autoptr(UhmMessage) online_message = NULL;
+	g_autoptr(GUri) base_uri = NULL;
 
 	g_return_if_fail (UHM_IS_SERVER (self));
 	g_return_if_fail (message_chunk != NULL);
@@ -1858,8 +1887,8 @@ uhm_server_received_message_chunk (UhmServer *self, const gchar *message_chunk, 
 
 	/* Append to the trace file. */
 	if (priv->enable_logging == TRUE &&
-	    (g_output_stream_write_all (G_OUTPUT_STREAM (priv->output_stream), message_chunk, message_chunk_length, NULL, NULL, &child_error) == FALSE ||
-	     g_output_stream_write_all (G_OUTPUT_STREAM (priv->output_stream), "\n", 1, NULL, NULL, &child_error) == FALSE)) {
+	    (!g_output_stream_write_all (G_OUTPUT_STREAM (priv->output_stream), message_chunk, message_chunk_length, NULL, NULL, &child_error) ||
+	     !g_output_stream_write_all (G_OUTPUT_STREAM (priv->output_stream), "\n", 1, NULL, NULL, &child_error))) {
 		gchar *trace_file_path = g_file_get_path (priv->trace_file);
 		g_set_error (error, child_error->domain, child_error->code,
 		             "Error appending to log file ‘%s’: %s", trace_file_path, child_error->message);
@@ -1870,8 +1899,8 @@ uhm_server_received_message_chunk (UhmServer *self, const gchar *message_chunk, 
 		return;
 	}
 
-	/* Or compare to the existing trace file. */
-	if (priv->enable_logging == FALSE && priv->enable_online == TRUE) {
+	/* Update comparison message */
+	if (priv->enable_online == TRUE) {
 		/* Build up the message to compare. We explicitly don't escape nul bytes, because we want the trace
 		 * files to be (pretty much) ASCII. File uploads are handled by zero-extending the responses according
 		 * to the traced Content-Length. */
@@ -1879,37 +1908,47 @@ uhm_server_received_message_chunk (UhmServer *self, const gchar *message_chunk, 
 		g_byte_array_append (priv->comparison_message, (const guint8 *) "\n", 1);
 
 		if (priv->received_message_state == RESPONSE_TERMINATOR) {
-			/* Received the last chunk of the response, so compare the message from the trace file and that from online. */
-			SoupMessage *online_message;
-			SoupURI *base_uri;
-
 			/* End of a message. */
 			base_uri = build_base_uri (self);
 			online_message = trace_to_soup_message ((const gchar *) priv->comparison_message->data, base_uri);
-			soup_uri_free (base_uri);
 
 			g_byte_array_set_size (priv->comparison_message, 0);
 			priv->received_message_state = UNKNOWN;
+		}
+	}
 
-			g_assert (priv->next_message != NULL);
+	/* Append to the hosts file */
+	if (online_message != NULL && priv->enable_online == TRUE && priv->enable_logging == TRUE) {
+		const char *host = soup_message_headers_get_one (uhm_message_get_request_headers (online_message), "Soup-Host");
 
-			/* Compare the message from the server with the message in the log file. */
-			if (compare_incoming_message (self, online_message, priv->next_message, NULL) != 0) {
-				gchar *next_uri, *actual_uri;
+		if (!g_output_stream_write_all (G_OUTPUT_STREAM (priv->hosts_output_stream), host, strlen (host), NULL, NULL, &child_error)  ||
+		    !g_output_stream_write_all (G_OUTPUT_STREAM (priv->hosts_output_stream), "\n", 1, NULL, NULL, &child_error)) {
+			g_autofree gchar *hosts_trace_file_path = g_file_get_path (priv->hosts_trace_file);
+			g_warning ("Error appending to host log file ‘%s’: %s", hosts_trace_file_path, child_error->message);
+		}
 
-				next_uri = soup_uri_to_string (soup_message_get_uri (priv->next_message), TRUE);
-				actual_uri = soup_uri_to_string (soup_message_get_uri (online_message), TRUE);
-				g_set_error (error, UHM_SERVER_ERROR, UHM_SERVER_ERROR_MESSAGE_MISMATCH,
-				             "Expected URI ‘%s’, but got ‘%s’.", next_uri, actual_uri);
-				g_free (actual_uri);
-				g_free (next_uri);
+		if (host != NULL)
+			g_hash_table_add (priv->hosts, g_strdup (host));
+	}
 
-				g_object_unref (online_message);
+	/* Or compare to the existing trace file. */
+	if (online_message != NULL && priv->enable_logging == FALSE && priv->enable_online == TRUE) {
+		/* Received the last chunk of the response, so compare the message from the trace file and that from online. */
+		g_assert (priv->next_message != NULL);
 
-				return;
-			}
+		/* Compare the message from the server with the message in the log file. */
+		if (compare_incoming_message (self, online_message, priv->next_message) != 0) {
+			gchar *next_uri, *actual_uri;
+
+			next_uri = uri_get_path_query (uhm_message_get_uri (priv->next_message));
+			actual_uri = uri_get_path_query (uhm_message_get_uri (online_message));
+			g_set_error (error, UHM_SERVER_ERROR, UHM_SERVER_ERROR_MESSAGE_MISMATCH,
+			             "Expected URI ‘%s’, but got ‘%s’.", next_uri, actual_uri);
+			g_free (actual_uri);
+			g_free (next_uri);
 
 			g_object_unref (online_message);
+			return;
 		}
 	}
 }
@@ -2020,24 +2059,18 @@ uhm_server_received_message_chunk_from_soup (SoupLogger *logger, SoupLoggerLogLe
 const gchar *
 uhm_server_get_address (UhmServer *self)
 {
+	GInetAddress *addr;
+
 	g_return_val_if_fail (UHM_IS_SERVER (self), NULL);
 
 	if (self->priv->address == NULL) {
 		return NULL;
 	}
 
-#ifdef HAVE_LIBSOUP_2_47_3
-{
-	GInetAddress *addr;
-
 	g_free (self->priv->address_string);
 	addr = g_inet_socket_address_get_address (G_INET_SOCKET_ADDRESS (self->priv->address));
 	self->priv->address_string = g_inet_address_to_string (addr);
 	return self->priv->address_string;
-}
-#else
-	return soup_address_get_physical (self->priv->address);
-#endif
 }
 
 /**
@@ -2212,12 +2245,11 @@ uhm_server_set_expected_domain_names (UhmServer *self, const gchar * const *doma
 
 static gboolean
 compare_messages_ignore_parameter_values_cb (UhmServer *server,
-                                             SoupMessage *expected_message,
-                                             SoupMessage *actual_message,
-                                             SoupClientContext *actual_client,
+                                             UhmMessage *expected_message,
+                                             UhmMessage *actual_message,
                                              gpointer user_data)
 {
-	SoupURI *expected_uri, *actual_uri;
+	GUri *expected_uri, *actual_uri;
 	const gchar * const *ignore_query_param_values = user_data;
 	gboolean retval;
 	GHashTable/*<string, string>*/ *expected_params = NULL;  /* owned */
@@ -2227,26 +2259,26 @@ compare_messages_ignore_parameter_values_cb (UhmServer *server,
 	guint i;
 
 	/* Compare method. */
-	if (g_strcmp0 (expected_message->method, actual_message->method) != 0) {
+	if (g_strcmp0 (uhm_message_get_method (expected_message), uhm_message_get_method (actual_message)) != 0) {
 		return FALSE;
 	}
 
 	/* Compare URIs, excluding query parameters. */
-	expected_uri = soup_message_get_uri (expected_message);
-	actual_uri = soup_message_get_uri (actual_message);
+	expected_uri = uhm_message_get_uri (expected_message);
+	actual_uri = uhm_message_get_uri (actual_message);
 
-	if (!parts_equal (expected_uri->user, actual_uri->user, FALSE) ||
-	    !parts_equal (expected_uri->password, actual_uri->password, FALSE) ||
-	    !parts_equal (expected_uri->path, actual_uri->path, FALSE) ||
-	    !parts_equal (expected_uri->fragment, actual_uri->fragment, FALSE)) {
+	if (!parts_equal (g_uri_get_user (expected_uri), g_uri_get_user (actual_uri), FALSE) ||
+	    !parts_equal (g_uri_get_password (expected_uri), g_uri_get_password (actual_uri), FALSE) ||
+	    !parts_equal (g_uri_get_path (expected_uri), g_uri_get_path (actual_uri), FALSE) ||
+	    !parts_equal (g_uri_get_fragment (expected_uri), g_uri_get_fragment (actual_uri), FALSE)) {
 		return FALSE;
 	}
 
 	/* Compare query parameters, excluding the ignored ones. Note that we
 	 * expect the ignored parameters to exist, but their values may
 	 * differ. */
-	expected_params = soup_form_decode (expected_uri->query);
-	actual_params = soup_form_decode (actual_uri->query);
+	expected_params = soup_form_decode (g_uri_get_query (expected_uri));
+	actual_params = soup_form_decode (g_uri_get_query (actual_uri));
 
 	/* Check the presence of ignored parameters. */
 	for (i = 0; ignore_query_param_values[i] != NULL; i++) {

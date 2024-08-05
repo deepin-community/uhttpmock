@@ -26,6 +26,7 @@
 #include <libsoup/soup.h>
 
 #include "uhm-resolver.h"
+#include "uhm-message.h"
 
 G_BEGIN_DECLS
 
@@ -69,7 +70,7 @@ typedef struct {
  * UhmServerClass:
  * @handle_message: Class handler for the #UhmServer::handle-message signal. Subclasses may implement this to override the
  * default handler for the signal. The default handler should always return %TRUE to indicate that it has handled
- * the @message from @client by setting an appropriate response on the #SoupMessage.
+ * the @message from @client by setting an appropriate response on the #SoupServerMessage.
  * @compare_messages: Class handler for the #UhmServer::compare-messages signal. Subclasses may implement this to override
  * the default handler for the signal. The handler should return %TRUE if @expected_message and @actual_message compare
  * equal, and %FALSE otherwise.
@@ -83,8 +84,8 @@ typedef struct {
 	GObjectClass parent;
 
 	/*< public >*/
-	gboolean (*handle_message) (UhmServer *self, SoupMessage *message, SoupClientContext *client);
-	gboolean (*compare_messages) (UhmServer *self, SoupMessage *expected_message, SoupMessage *actual_message, SoupClientContext *actual_client);
+	gboolean (*handle_message) (UhmServer *self, UhmMessage *message);
+	gboolean (*compare_messages) (UhmServer *self, UhmMessage *expected_message, UhmMessage *actual_message);
 } UhmServerClass;
 
 GType uhm_server_get_type (void) G_GNUC_CONST;
